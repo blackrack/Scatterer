@@ -83,21 +83,21 @@ namespace Scatterer
 		private Camera targetCamera;
 		private CommandBuffer rendererCommandBuffer;
 
-		private RenderTexture oceanRenderTexture, depthCopyRenderTexture;
+		private int oceanRenderTextureNameID, depthCopyRenderTextureNameID;
 		private Material copyCameraDepthMaterial;
 		bool oceanScreenShotModeEnabled = false;
-
-		int width = 0, height = 0;
 
 		public void Initialize()
         {
             targetCamera = GetComponent<Camera>();
 
             copyCameraDepthMaterial = new Material(ShaderReplacer.Instance.LoadedShaders["Scatterer/CopyCameraDepth"]);
-            CreateRenderTextures();
 
             rendererCommandBuffer = new CommandBuffer();
             rendererCommandBuffer.name = "Ocean MeshRenderer CommandBuffer";
+
+            oceanRenderTextureNameID = Shader.PropertyToID(nameof(oceanRenderTextureNameID));
+            depthCopyRenderTextureNameID = Shader.PropertyToID(nameof(depthCopyRenderTextureNameID));
 
             RecreateCommandBuffer();
         }
@@ -106,11 +106,28 @@ namespace Scatterer
         {
             rendererCommandBuffer.Clear();
 
+            // review: not sure if these automatically generate mips.
+            // might need to use the overload that takes RenderTextureDescriptor to disable them
+
+            rendererCommandBuffer.GetTemporaryRT(
+                depthCopyRenderTextureNameID,
+                -1, -1, // width, height: use camera dimensions
+                0, // depth buffer bits
+                FilterMode.Point,
+                RenderTextureFormat.RFloat);
+
+            rendererCommandBuffer.GetTemporaryRT(
+                oceanRenderTextureNameID,
+                -1, -1, // width, height: use camera dimensions
+                0, // depth buffer bits
+                FilterMode.Point,
+                hdrEnabled ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.ARGB32);
+
             // Init depth render texture
-            rendererCommandBuffer.Blit(null, depthCopyRenderTexture, copyCameraDepthMaterial, 3);
+            rendererCommandBuffer.Blit(null, depthCopyRenderTextureNameID, copyCameraDepthMaterial, 3);
 
             // Draw ocean renderer, output as normal to the screen, and ocean depth to the depth texture
-            RenderTargetIdentifier[] oceanRenderTargets = { new RenderTargetIdentifier(BuiltinRenderTextureType.CameraTarget), new RenderTargetIdentifier(depthCopyRenderTexture) };
+            RenderTargetIdentifier[] oceanRenderTargets = { new RenderTargetIdentifier(BuiltinRenderTextureType.CameraTarget), new RenderTargetIdentifier(depthCopyRenderTextureNameID) };
 
             rendererCommandBuffer.SetRenderTarget(oceanRenderTargets, BuiltinRenderTextureType.CameraTarget);
             rendererCommandBuffer.DrawRenderer(targetRenderer, targetMaterial, 0, 0);   //this doesn't work with pixel lights so render only the main pass here and render pixel lights the regular way
@@ -118,7 +135,7 @@ namespace Scatterer
 
             // expose the new depth buffer
             rendererCommandBuffer.SetRenderTarget(BuiltinRenderTextureType.CameraTarget);
-            rendererCommandBuffer.SetGlobalTexture("ScattererDepthCopy", depthCopyRenderTexture);
+            rendererCommandBuffer.SetGlobalTexture("ScattererDepthCopy", depthCopyRenderTextureNameID);
 
             // enable cloud shadows
             rendererCommandBuffer.SetGlobalFloat(ShaderProperties.render_ocean_cloud_shadow_PROPERTY, 1f);
@@ -139,78 +156,20 @@ namespace Scatterer
             rendererCommandBuffer.SetGlobalFloat(ShaderProperties.render_ocean_cloud_shadow_PROPERTY, 0f);
 
             // recopy the screen and expose it as input for the scattering
-            rendererCommandBuffer.Blit(BuiltinRenderTextureType.CameraTarget, new RenderTargetIdentifier(oceanRenderTexture));
+            rendererCommandBuffer.Blit(BuiltinRenderTextureType.CameraTarget, new RenderTargetIdentifier(oceanRenderTextureNameID));
 
             // then set the textures for the scattering shader
-            rendererCommandBuffer.SetGlobalTexture("ScattererScreenCopy", oceanRenderTexture);
-        }
-
-        private void GetTargetDimensions(out int screenWidth, out int screenHeight)
-        {
-            if (targetCamera.activeTexture)
-            {
-                screenWidth = targetCamera.activeTexture.width;
-                screenHeight = targetCamera.activeTexture.height;
-            }
-            else
-            {
-                screenWidth = Screen.width;
-                screenHeight = Screen.height;
-            }
-        }
-
-        void CreateRenderTextures ()
-        {
-            targetCamera.forceIntoRenderTexture = true; //do this to force the camera target orientation to always match depth orientation
-                                                        //that way we don't have to worry about flipping them separately
-            hdrEnabled = targetCamera.allowHDR;
-
-            GetTargetDimensions(out width, out height);
-            CreateTextures(width, height);
-        }
-
-        private void CreateTextures(int targetWidth, int targetHeight)
-        {
-			if (depthCopyRenderTexture)
-				depthCopyRenderTexture.Release();
-
-			if (oceanRenderTexture)
-				oceanRenderTexture.Release();
-
-			oceanRenderTexture = new RenderTexture(targetWidth, targetHeight, 0, hdrEnabled ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.ARGB32);
-            oceanRenderTexture.useMipMap = false;
-            oceanRenderTexture.autoGenerateMips = false;
-            oceanRenderTexture.Create();
-
-            depthCopyRenderTexture = new RenderTexture(targetWidth, targetHeight, 0, RenderTextureFormat.RFloat);
-            depthCopyRenderTexture.useMipMap = false;
-            depthCopyRenderTexture.autoGenerateMips = false;
-            depthCopyRenderTexture.filterMode = FilterMode.Point;
-            depthCopyRenderTexture.Create();
+            rendererCommandBuffer.SetGlobalTexture("ScattererScreenCopy", oceanRenderTextureNameID);
         }
 
         public void EnableForThisFrame()
 		{
 			if (!renderingEnabled)
             {
-                int targetWidth, targetHeight;
-                GetTargetDimensions(out targetWidth, out targetHeight);
-
-                if (hdrEnabled != targetCamera.allowHDR || width != targetWidth || height != targetHeight || !oceanRenderTexture.IsCreated() || !depthCopyRenderTexture.IsCreated())
+                if (hdrEnabled != targetCamera.allowHDR)
                 {
-                    CreateRenderTextures();
                     RecreateCommandBuffer();
                 }
-
-				bool screenShotModeEnabled = GameSettings.TAKE_SCREENSHOT.GetKeyDown(false);
-				if (oceanScreenShotModeEnabled != screenShotModeEnabled)
-                {
-					// Resize textures
-					int superSizingFactor = screenShotModeEnabled ? Mathf.Max(GameSettings.SCREENSHOT_SUPERSIZE, 1) : 1;
-					CreateTextures(width * superSizingFactor, height * superSizingFactor);
-
-					oceanScreenShotModeEnabled = screenShotModeEnabled;
-				}
 
                 targetCamera.AddCommandBuffer(CameraEvent.AfterImageEffectsOpaque, rendererCommandBuffer); //ocean renders on AfterImageEffectsOpaque, local scattering (with it's depth downscale) can render and copy to screen on afterForwardAlpha
                 renderingEnabled = true;
@@ -232,11 +191,8 @@ namespace Scatterer
 			{
 				targetCamera.RemoveCommandBuffer (CameraEvent.AfterImageEffectsOpaque, rendererCommandBuffer);
 
-				if (depthCopyRenderTexture)
-					depthCopyRenderTexture.Release();
-				
-				if (oceanRenderTexture)
-					oceanRenderTexture.Release();
+				rendererCommandBuffer.Release();
+				rendererCommandBuffer = null;
 
 				renderingEnabled = false;
 			}
